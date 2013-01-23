@@ -25,7 +25,7 @@ import scala.annotation.tailrec
 
 case class PowerRecord (d : String, gap : Double, grp : Double, v : Double,  gi : Double, s1 : Double,s2 : Double,s3 : Double){
   def powerRecord2List = {
-    List((this.gap),(this.grp) , (this.v) , (this.gi) ,(this.s1), (this.s1),(this.s1), this.s2,this.s3)
+    List((this.gap),(this.grp) , (this.v) , (this.gi) ,(this.s1), this.s2,this.s3)
   }
   def diffs(that : PowerRecord) : List[Double]   ={
     this.powerRecord2List.zip(that.powerRecord2List).map(t=> t._1 - t._2)
@@ -147,10 +147,12 @@ object Clustering{
 
 class Clustering (args : Args) extends Job(args)
 {
-
+  val STEPS : Int = args.getOrElse("steps","4").toInt
   def cluster() = {
+
+     println("init")
      val ppr = init()
-     val result = cluster0(2)(ppr,false)
+     val result = cluster0(STEPS)(ppr,false)
      val centroids = result.map(ppr => ppr.centroid)
      result.write(Tsv(args("output") + "/result"))
 
@@ -182,22 +184,26 @@ class Clustering (args : Args) extends Job(args)
   }
   @tailrec
   final def cluster0(steps : Int)(pipe : TypedPipe[PartitionedPowerRecord], converged : Boolean) : TypedPipe[PartitionedPowerRecord] = {
-      if (steps <= 0 || converged){ pipe}
+      if (steps <= 0 || converged)
+
+      {
+        pipe.write(Tsv(args("output") + "/debug/exit-pipe" + steps)).forceToDisk
+      }
      else
       {
         val l = List.empty[Double]
         val newCentroids = pipe.groupBy(ppr => ppr.centroid.hashCode()).foldLeft(AggregratingCentroid(0,l))((ac,ppr) => ac.+(ppr))
           .map(t => t._2.evaluate).groupAll.foldLeft(Centroids(List.empty[Centroid]))((cs,c) => Centroids.append(cs,c))
 
-        newCentroids.write(Tsv(args("output") + "/debug/centroid-pass" + steps))
+        newCentroids.write(Tsv(args("output") + "/debug/centroid-pass" + steps)).forceToDisk
 
         val partitions = pipe.cross(newCentroids)
           .map(t => (t._1,t._2._2) )
-          .map(t => PartitionedPowerRecord(t) )
+          .map(t => PartitionedPowerRecord(t) ).forceToDisk
 
 
         //val converged = partitions.filter(ppr => ppr.converged == false)
-
+         partitions.write(Tsv(args("output") + "/debug/partitions-pass" + steps)).forceToDisk
         cluster0(steps -1)(partitions,false)
 
       }
