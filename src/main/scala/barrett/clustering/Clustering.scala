@@ -147,6 +147,8 @@ object Clustering{
 
 class Clustering (args : Args) extends Job(args)
 {
+  type PartitionPowerRecordPipe = TypedPipe[PartitionedPowerRecord]
+
   val STEPS : Int = args.getOrElse("steps","4").toInt
   def cluster() = {
 
@@ -158,7 +160,7 @@ class Clustering (args : Args) extends Job(args)
 
 
   }
-  private def init() :  TypedPipe[PartitionedPowerRecord] = {
+  private def init() :  PartitionPowerRecordPipe = {
     val text = TextLine( args("input") + "/hpc.txt" )
     val typedText : TypedPipe[String] = TypedPipe.from(text)
 
@@ -183,7 +185,7 @@ class Clustering (args : Args) extends Job(args)
 
   }
   @tailrec
-  final def cluster0(steps : Int)(pipe : TypedPipe[PartitionedPowerRecord], converged : Boolean) : TypedPipe[PartitionedPowerRecord] = {
+  final def cluster0(steps : Int)(pipe : PartitionPowerRecordPipe, converged : Boolean) : PartitionPowerRecordPipe = {
       if (steps <= 0 || converged)
 
       {
@@ -191,6 +193,8 @@ class Clustering (args : Args) extends Job(args)
       }
      else
       {
+
+
         val l = List.empty[Double]
         val newCentroids = pipe.groupBy(ppr => ppr.centroid.hashCode()).foldLeft(AggregratingCentroid(0,l))((ac,ppr) => ac.+(ppr))
           .map(t => t._2.evaluate).groupAll.foldLeft(Centroids(List.empty[Centroid]))((cs,c) => Centroids.append(cs,c))
