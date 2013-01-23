@@ -2,10 +2,13 @@ package barrett.rf.clustering
 
 
 import com.twitter.scalding._
-import scala.util.Random._
+
 import cascading.tuple.Fields
 import com.twitter.scalding.Tsv
 import com.twitter.scalding.TextLine
+
+import scala.util.Random._
+import scala.annotation.tailrec
 
 
 /**
@@ -16,12 +19,11 @@ import com.twitter.scalding.TextLine
  * To change this template use File | Settings | File Templates.
  */
 
-import com.twitter.scalding._
-import scala.util.Random._
 
 
-case class PowerRecord (d : String, gap : Double, grp : Double, v : Double,  gi : Double, s1 : Double,s2 : Double,s3 : Double)
-{
+
+
+case class PowerRecord (d : String, gap : Double, grp : Double, v : Double,  gi : Double, s1 : Double,s2 : Double,s3 : Double){
   def powerRecord2List = {
     List((this.gap),(this.grp) , (this.v) , (this.gi) ,(this.s1), (this.s1),(this.s1), this.s2,this.s3)
   }
@@ -37,9 +39,7 @@ case class PowerRecord (d : String, gap : Double, grp : Double, v : Double,  gi 
 
   def closestCentroid(cs : Centroids) : Centroid = cs.means.map(c => (c,this.euclideanDistance(c.pr))).minBy(t => t._2)._1
 }
-
-object PowerRecord
-{
+object PowerRecord {
 
 
   def fromList(l : List[Double])  = PowerRecord("",l(0),l(1),l(2),l(3),l(4),l(5),l(6))
@@ -48,9 +48,7 @@ object PowerRecord
 }
 
 case class Centroid(pr : PowerRecord)
-
 case class Centroids(means : List[Centroid])
-
 object Centroids {
 
   def  append(cs : Centroids, centroid : Centroid) : Centroids = Centroids( centroid :: cs.means)
@@ -58,31 +56,52 @@ object Centroids {
 
 }
 
+case class PartitionedPowerRecord(pr : PowerRecord, centroid : Centroid, converged : Boolean)
+object PartitionedPowerRecord {
 
 
-case class PartitionedPowerRecord(pr : PowerRecord, centroid : Centroid)
+  def apply(pr : PowerRecord, centroid : Centroid) = new PartitionedPowerRecord(pr,centroid,false)
+  def apply(t : (PartitionedPowerRecord, Centroids)) = {
 
-case class AggregratingCentroid(count : Int,pr : List[List[Double]])
-{
-
-  def +(that : PartitionedPowerRecord) : AggregratingCentroid = this.+(that.pr)
-  def +(that : PowerRecord) : AggregratingCentroid   = AggregratingCentroid(this.count + 1, that.powerRecord2List :: this.pr)
-  lazy val evaluate :  (Centroid,Double) = {
-
-
-    val mean = (this.pr.reduce((a,b) => a.zip(b).map(t=> t._1 + t._2)))
-    val c = Centroid(PowerRecord.fromList(mean))
-    (c, (mean.sum)/ count)
+    val ppr = t._1
+    val pr = ppr.pr
+    val newClosest =   pr.closestCentroid(t._2)
+    val stable =   ppr.centroid == newClosest
+    new PartitionedPowerRecord(pr,newClosest,stable )
   }
+
+
 
 }
 
+case class AggregratingCentroid(count : Int,mean : List[Double]){
+
+  def +(that : PartitionedPowerRecord) : AggregratingCentroid = this.+(that.pr)
+  def +(that : PowerRecord) : AggregratingCentroid   = {
+    this.mean match
+    {
+      case h::t => {
+
+        val mean = this.mean.zip(that.powerRecord2List).map(t => (t._1 + t._2)/2)
+        AggregratingCentroid(this.count + 1, mean)
+      }
+        case Nil => AggregratingCentroid(this.count + 1, that.powerRecord2List)
+      }
+
+
+    }
 
 
 
 
+  lazy val evaluate :  Centroid = {
 
+    val c = Centroid(PowerRecord.fromList(this.mean))
+    c
 
+  }
+
+}
 case class Wrapper(id : Int, pr : PowerRecord)
 
 object Wrapper{
@@ -91,10 +110,7 @@ object Wrapper{
 
 
 }
-
-object Clustering
-{
-
+object Clustering{
   def line2PowerRecord(line : String) : Option[PowerRecord]  = {
     val splits = line.split(';')
     val isDirtyData = splits.contains("?")
@@ -120,62 +136,83 @@ object Clustering
 
     }
   }
-
   def shouldKeep(pr : Option[PowerRecord]) : Boolean = {
     pr match {
     case Some(pr)  => true
     case None => false
     }
   }
-
 }
 
 
 class Clustering (args : Args) extends Job(args)
 {
 
-
-  val text = TextLine( args("input") + "/hpc.txt" )
-  val typedText : TypedPipe[String] = TypedPipe.from(text)
-
-
-  val powerRecords = typedText.map(line => Clustering.line2PowerRecord(line))
-  val filteredPowerRecords = powerRecords.filter(pr => Clustering.shouldKeep(pr))
-                                         .map(opr => opr.get )
-                                         .groupAll
+  def cluster() = {
+     val ppr = init()
+     val result = cluster0(2)(ppr,false)
+     val centroids = result.map(ppr => ppr.centroid)
+     result.write(Tsv(args("output") + "/result"))
 
 
+  }
+  private def init() :  TypedPipe[PartitionedPowerRecord] = {
+    val text = TextLine( args("input") + "/hpc.txt" )
+    val typedText : TypedPipe[String] = TypedPipe.from(text)
+
+
+    val powerRecords = typedText.map(line => Clustering.line2PowerRecord(line))
+    val filteredPowerRecords = powerRecords.filter(pr => Clustering.shouldKeep(pr))
+      .map(opr => opr.get )
+
+    val initialCentroidText =  TextLine( args("input") + "/initialCentroids.txt" )
+    val initialCentroidsTyped : TypedPipe[String] =  TypedPipe.from(initialCentroidText)
+
+    val initialCentroids   =   initialCentroidsTyped.map(line => Clustering.line2PowerRecord(line))
+      .filter(pr => Clustering.shouldKeep(pr))
+      .map(opr => opr.get)
+      .map(pr => Centroid(pr))
+      .groupAll.foldLeft(Centroids(List.empty[Centroid]))((cs,c) => Centroids.append(cs,c)).map(t => t._2)
+
+    val grp = filteredPowerRecords.cross(initialCentroids)
+    val partitions = grp.map(t => PartitionedPowerRecord(t._1,t._1.closestCentroid(t._2)) )
+    partitions
+
+
+  }
+  @tailrec
+  final def cluster0(steps : Int)(pipe : TypedPipe[PartitionedPowerRecord], converged : Boolean) : TypedPipe[PartitionedPowerRecord] = {
+      if (steps <= 0 || converged){ pipe}
+     else
+      {
+        val l = List.empty[Double]
+        val newCentroids = pipe.groupBy(ppr => ppr.centroid.hashCode()).foldLeft(AggregratingCentroid(0,l))((ac,ppr) => ac.+(ppr))
+          .map(t => t._2.evaluate).groupAll.foldLeft(Centroids(List.empty[Centroid]))((cs,c) => Centroids.append(cs,c))
+
+        newCentroids.write(Tsv(args("output") + "/debug/centroid-pass" + steps))
+
+        val partitions = pipe.cross(newCentroids)
+          .map(t => (t._1,t._2._2) )
+          .map(t => PartitionedPowerRecord(t) )
+
+
+        //val converged = partitions.filter(ppr => ppr.converged == false)
+
+        cluster0(steps -1)(partitions,false)
+
+      }
 
 
 
-  val initialCentroidText =  TextLine( args("input") + "/initialCentroids.txt" )
-  val initialCentroidsTyped : TypedPipe[String] =  TypedPipe.from(initialCentroidText)
+}
 
-  val initialCentroids   =   initialCentroidsTyped.map(line => Clustering.line2PowerRecord(line))
-                                              .filter(pr => Clustering.shouldKeep(pr))
-                                              .map(opr => opr.get)
-                                              .map(pr => Centroid(pr))
-                                              .groupAll.foldLeft(Centroids(List.empty[Centroid]))((cs,c) => Centroids.append(cs,c))
+   cluster()
 
 
 
 
-  val initialCentroidGroup = initialCentroids.groupAll
-
-  val grp = filteredPowerRecords.join(initialCentroidGroup).mapValues(t => (t._1,t._2._2))
-  val partitions = grp.mapValues(t => PartitionedPowerRecord(t._1,t._1.closestCentroid(t._2)) ).toTypedPipe.map(t => t._2)
 
 
-  val l = List.empty[List[Double]]
-  val newCentroids = partitions.groupBy(ppr => ppr.centroid.hashCode()).foldLeft(AggregratingCentroid(0,l))((ac,ppr) => ac.+(ppr))
-    .map(t => t._2.evaluate).map(t => t._1).groupAll.foldLeft(Centroids(List.empty[Centroid]))((cs,c) => Centroids.append(cs,c)).groupAll
-
-  val grp1 = filteredPowerRecords.join(newCentroids)
-                                 .mapValues(t => (t._1,t._2._2) )
-                                 .mapValues(t => PartitionedPowerRecord(t._1,t._1.closestCentroid(t._2)) )
-                                 .toTypedPipe.map(t => t._2)
-
-  partitions.write(Tsv(args("output") + "/result"))
 }
 
 
