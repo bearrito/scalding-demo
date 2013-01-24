@@ -9,6 +9,7 @@ import com.twitter.scalding.TextLine
 
 import scala.util.Random._
 import scala.annotation.tailrec
+import barrett.rf.clustering
 
 
 /**
@@ -104,6 +105,20 @@ case class AggregratingCentroid(count : Int,mean : List[Double]){
 }
 case class Wrapper(id : Int, pr : PowerRecord)
 
+sealed trait ConvergenceIndicator
+case object  PowerRecordConverged
+case object PowerRecordNotConverged
+case class ConvergenceCount(converged : Int, notConverged : Int)
+{
+    def add(ppr : PartitionedPowerRecord) =  if(ppr.converged){ ConvergenceCount(this.converged + 1, this.notConverged)    } else     ConvergenceCount(this.converged , this.notConverged + 1 )
+
+
+
+
+
+}
+
+
 object Wrapper{
 
   implicit def wrapper2PowerRecord(w : Wrapper)  : PowerRecord = w.pr
@@ -155,13 +170,14 @@ class Clustering (args : Args) extends Job(args)
      println("init")
      val ppr = init()
      val result = cluster0(STEPS)(ppr,false)
+     println("clustering complete")
      val centroids = result.map(ppr => ppr.centroid)
      result.write(Tsv(args("output") + "/result"))
 
 
   }
   private def init() :  PartitionPowerRecordPipe = {
-    val text = TextLine( args("input") + "/hpc.txt" )
+    val text = TextLine( args("input") + "/hpc_small" )
     val typedText : TypedPipe[String] = TypedPipe.from(text)
 
 
@@ -180,6 +196,7 @@ class Clustering (args : Args) extends Job(args)
 
     val grp = filteredPowerRecords.cross(initialCentroids)
     val partitions = grp.map(t => PartitionedPowerRecord(t._1,t._1.closestCentroid(t._2)) )
+    println("return partitions")
     partitions
 
 
@@ -187,8 +204,8 @@ class Clustering (args : Args) extends Job(args)
   @tailrec
   final def cluster0(steps : Int)(pipe : PartitionPowerRecordPipe, converged : Boolean) : PartitionPowerRecordPipe = {
       if (steps <= 0 || converged)
-
       {
+        println("writing exit pipe")
         pipe.write(Tsv(args("output") + "/debug/exit-pipe" + steps)).forceToDisk
       }
      else
@@ -207,7 +224,10 @@ class Clustering (args : Args) extends Job(args)
 
 
         //val converged = partitions.filter(ppr => ppr.converged == false)
-         partitions.write(Tsv(args("output") + "/debug/partitions-pass" + steps)).forceToDisk
+         partitions.write(Tsv(args("output") + "/debug/partitions-steps-remaining" + steps)).forceToDisk
+         val converged = partitions.groupAll.foldLeft(ConvergenceCount(0,0))((cc,ppr) => cc.add(ppr))
+         converged.write(Tsv(args("output") + "/debug/converged-steps-remaining" + steps)).forceToDisk
+        println("returning partitions. Steps remaining " + steps)
         cluster0(steps -1)(partitions,false)
 
       }
